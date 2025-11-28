@@ -1,0 +1,11 @@
+ipython
+pytest
+pydantic>=2.0
+pydantic-settings>=2.0
+langgraph>=1.0.0
+vllm
+openai>=1.0.0
+FlagEmbedding
+llama-index
+llama-index-llms-openai
+llama-index-llms-openai-like
