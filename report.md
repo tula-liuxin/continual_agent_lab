@@ -1,0 +1,107 @@
+# 项目报告
+
+## 项目定位
+- continual_agent_lab 是一个以 LangGraph 为核心编排的轻量级 Agent / RAG 实验场，聚焦本地 vLLM(Qwen) 推理、BGE-M3 向量化与 LlamaIndex 检索，突出分层解耦、接口可替换、状态与 trace 可观测。
+
+## 框架栈
+- LangGraph：状态图与条件边驱动对话流程。
+- LlamaIndex：向量索引、检索与问答封装。
+- vLLM（OpenAI-compatible）+ Qwen：本地 LLM 推理。
+- FlagEmbedding BGE-M3：文本 embedding。
+- Pydantic / pydantic-settings：数据模型与配置管理。
+- pytest：测试框架（tests/ 目前为空）。
+
+## 目录-模块-文件-函数（按层级缩进）
+- 根目录
+  - `README.md`：分层与模块概览（中文）。
+  - `AGENTS.md`：贡献者指南。
+  - `requirements.txt`：依赖列表（langgraph、vllm、openai、FlagEmbedding、llama-index 等）。
+  - `tests/`：放置 pytest 用例（当前空）。
+  - `src/app/`
+    - `__init__.py`：包标记。
+    - `config/`
+      - `__init__.py`：包标记。
+      - `base.py`
+        - `AppSettings(BaseSettings)`：全局配置，字段 `env/project_name/log_level/vllm_base_url/qwen_model/embedding_model`，支持 `.env` + `AGENT_` 前缀，`extra="ignore"`。
+        - `get_settings()`：带 `lru_cache` 的单例配置入口。
+    - `common/`
+      - `__init__.py`：包标记。
+      - `messages.py`
+        - `Role`：字面量角色 `"user"|"assistant"|"system"|"tool"`。
+        - `Message(BaseModel)`：统一消息，字段 `role/content`，可选 `name/tool_call_id`。
+      - `state.py`
+        - `AgentState(TypedDict)`：LangGraph 状态，包含 `messages`，可选 `rag_answer`、`traces`。
+      - `rag_types.py`
+        - `RetrievedChunk(BaseModel)`：检索片段，含 `text/score/metadata`。
+        - `RAGAnswer(BaseModel)`：RAG 输出，含 `answer/contexts`。
+      - `tracing.py`
+        - `TraceEvent(BaseModel)`：节点执行事件，字段 `ts/node/kind/info`。
+    - `infra/`
+      - `__init__.py`：包标记。
+      - `llm/`
+        - `__init__.py`：包标记。
+        - `base.py`
+          - `LLMClient(Protocol)`：约定接口 `chat(messages: List[Message]) -> Message`。
+        - `dummy.py`
+          - `DummyLLMClient.chat(messages)`：查找最后一条 user 消息并返回模拟回复，未找到则提示未收到消息。
+        - `vllm_client.py`
+          - `VllmLLMClient.__init__(base_url, api_key, model, timeout)`：读取配置构造 OpenAI 客户端（指向 vLLM），默认模型 `AGENT_QWEN_MODEL`。
+          - `_to_openai_messages(messages)`：将内部 Message 列表转为 OpenAI messages 格式。
+          - `_normalize_content(content)`：兼容字符串/多模态列表，归一为文本。
+          - `chat(messages)`：调用 vLLM `/chat/completions`，取首选项并返回标准 Message。
+        - `llamaindex_qwen.py`
+          - `build_llamaindex_qwen_llm()`：构造 LlamaIndex `OpenAILike` LLM，设置模型名、Base URL、上下文窗口、接口类型（chat）。
+      - `embed/`
+        - `__init__.py`：包标记。
+        - `base.py`
+          - `EmbeddingClient(Protocol)`：接口 `embed_documents(texts)->np.ndarray`，`embed_query(text)->np.ndarray`。
+        - `bge_m3.py`
+          - `BgeM3EmbeddingClient.__init__(model_name=None, use_fp16=True)`：加载 BAAI/bge-m3（FlagEmbedding），默认读配置。
+          - `embed_documents(texts)`：批量编码返回 `(N,D)` 向量，空列表返回零矩阵。
+          - `embed_query(text)`：单条查询编码返回 `(D,)`。
+        - `llamaindex_bge_m3.py`
+          - `LlamaIndexBgeM3Embedding`：适配为 LlamaIndex `BaseEmbedding`。
+          - `class_name()`：返回标识 `"bge_m3"`。
+          - `_aget_query_embedding/_aget_text_embedding`：异步接口复用同步逻辑。
+          - `_get_query_embedding(query)`：调用 client.query，返回向量列表。
+          - `_get_text_embedding(text)`：同上，复用 query。
+          - `_get_text_embeddings(texts)`：逐条编码，返回二维列表。
+    - `rag/`
+      - `__init__.py`：包标记。
+      - `service.py`
+        - `RAGService.__init__(texts)`：设置全局 `Settings.embed_model/llm`，将文本转 `Document`，构建 `VectorStoreIndex` 与 `QueryEngine`。
+        - `query(question, top_k=2)`：调用 query_engine，提取 `source_nodes`，组装 `RetrievedChunk` 列表并返回 `RAGAnswer`。
+        - `from_texts(texts)`：便捷构造器调用 `__init__`。
+    - `graph/`
+      - `__init__.py`：包标记。
+      - `simple_graph.py`
+        - `make_llm_node(llm_client)`：返回 LangGraph 节点闭包 `llm_node(state)`，调用 `llm_client.chat` 追加回复。
+        - `build_simple_graph(llm_client)`：注册单节点 LLM，入口即结束，返回编译后的图。
+      - `rag_graph.py`
+        - `make_rag_node(rag_service)`：节点闭包 `rag_node(state)`，抓取最后 user 问题，调用 `rag_service.query`，写入回答、rag_answer、trace。
+        - `build_rag_graph(rag_service)`：入口为 RAG 节点的单分支图。
+      - `routed_graph.py`
+        - `route_by_keywords(state)`：依据关键词（资料/文档/知识库/RAG/embedding/嵌入/检索/查一下）决定走 `"rag"` 或 `"llm"`。
+        - `router_node(state)`：仅记录路由决策到 traces，不改 messages。
+        - `build_routed_graph(llm_client, rag_service)`：注册 router/llm/rag 节点，条件边分流，两个分支均指向 END。
+    - `cli/`
+      - `__init__.py`：包标记。
+      - `echo.py`
+        - `main()`：vLLM + 简单图的对话 CLI，循环读取输入，退出命令 `exit/quit/q`。
+      - `rag_demo.py`
+        - `main()`：直接用 `RAGService` 问答，展示回答与检索片段，退出命令 `q/quit/exit`。
+      - `rag_chat.py`
+        - `main()`：构建 `build_rag_graph`，交互式对话，展示回答与 RAG 上下文。
+      - `router_chat.py`
+        - `main()`：构建 `build_routed_graph`，根据关键词选择 LLM 或 RAG，展示回答、上下文与 traces。
+    - `agents/__init__.py`：预留包标记（未来放 Agent 实现）。
+
+- 核心数据流与接口
+  - `Message` 列表贯穿 LLM/RAG 节点；`AgentState` 携带 `messages`、可选 `rag_answer` 与 `traces`。
+  - `LLMClient.chat`、`EmbeddingClient.embed_*`、`RAGService.query` 是三大可替换接口，LangGraph 节点通过依赖注入调用。
+  - Router 通过 `route_by_keywords` 决定分支，trace 记录决策与节点执行，支撑可观测性。
+
+- 愿景
+  - 保持“小而清晰”的分层：配置/公共类型 → 基础能力（LLM/Embedding） → 能力服务（RAG） → 编排（Graph） → 入口（CLI）。
+  - 便捷替换与扩展：更换模型、路由策略或新增工具节点时，上层调用不变；trace/state 显式，便于调试与后续评估。
+  - 作为本地 Agent/RAG 的基线模板，逐步扩展到多工具、多 Agent、强化学习决策等实验场景。***
